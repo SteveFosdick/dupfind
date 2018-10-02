@@ -120,6 +120,14 @@ typedef struct
     char   keep;
 } delete_t;
 
+/* user data passed to tree foreach. */
+
+typedef struct
+{
+    GHashTable *hash;
+    GChecksum  *digest;
+} tree_foreach_t;
+
 /* Bit-map of command line options */
 
 static unsigned long options;
@@ -228,90 +236,43 @@ static int do_stdin(GTree *file_tree)
     return status;
 }
 
-/* Function called during phase two to get the message digest for the
- * specified file. */
-
-static char *digest_file(const char *file)
-{
-    int		  fd;
-    gcry_error_t  gcry_err;
-    gcry_md_hd_t  gcry_hd;
-    int		  md_len;
-    unsigned char *md_dig;
-    unsigned char *md_end;
-    char	  *md_txt;
-    char	  *md_ptr;
-    unsigned char buf[CHUNK_SIZE];
-    ssize_t	  nbytes;
-    int		  byte;
-
-    static const char xdigs[] = "0123456789abcdef";
-
-    md_txt = NULL;
-    if ((fd = open(file, O_RDONLY, 0)) >= 0)
-    {
-	gcry_err = gcry_md_open(&gcry_hd, DIGEST_ALGO, 0);
-	if (gcry_err_code(gcry_err) == GPG_ERR_NO_ERROR)
-	{
-	    while ((nbytes = read(fd, buf, sizeof(buf))) > 0)
-		gcry_md_write(gcry_hd, buf, nbytes);
-	    close(fd);
-	    if ((md_dig = gcry_md_read(gcry_hd, 0)))
-	    {
-		md_len = gcry_md_get_algo_dlen(DIGEST_ALGO);
-		md_end = md_dig + md_len;
-		md_ptr = md_txt = g_malloc(md_len*2 + 1);
-		while (md_dig < md_end)
-		{
-		    byte = *md_dig++;
-		    *md_ptr++ = xdigs[byte >> 4];
-		    *md_ptr++ = xdigs[byte & 0x0f];
-		}
-		*md_ptr = '\0';
-	    }
-	    else
-		g_warning("digest calculation failed on file '%s'", file);
-	    gcry_md_close(gcry_hd);
-	}
-	else
-	{
-	    close(fd);
-	    g_warning("digest calculation failed on file '%s' - %s",
-		      file, gcry_strerror(gcry_err));
-	}
-    }
-    else
-	g_warning("unable to open file '%s' for reading - %m", file);
-    return md_txt;
-}
-
 /* Function called during phase two by g_hash_table_foreach for each
  * file in the first hashtable, keyed by filename */
 
 static gboolean file_foreach(gpointer key, gpointer value, gpointer udata)
 {
-    char	*file = key;
-    char	*digest_txt;
-    GHashTable	*digest_hash;
-    file_list_t *file_list;
+    char	   *file = key;
+    const char	   *digest_txt;
+    char           *digest_cpy;
+    tree_foreach_t *fdata = udata;
+    file_list_t    *file_list;
+    int            fd;
+    ssize_t        nbytes;
+    unsigned char  buf[8192];
 
-    if ((digest_txt = digest_file(file)))
-    {
-	digest_hash = udata;
-	if ((file_list = g_hash_table_lookup(digest_hash, digest_txt)))
-	{
-	    g_free(digest_txt);
-	    file_list->nfile++;
-	    file_list->files = g_list_append(file_list->files, value);
-	}
-	else
-	{
-	    file_list = g_malloc(sizeof(file_list_t));
-	    file_list->nfile = 1;
-	    file_list->files = g_list_append(NULL, value);
-	    g_hash_table_insert(digest_hash, digest_txt, file_list);
-	}
+    if ((fd = open(file, O_RDONLY, 0)) >= 0) {
+        while ((nbytes = read(fd, buf, sizeof(buf))) > 0)
+            g_checksum_update(fdata->digest, buf, nbytes);
+        close(fd);
+        if ((digest_txt = g_checksum_get_string(fdata->digest))) {
+            if ((file_list = g_hash_table_lookup(fdata->hash, digest_txt))) {
+                file_list->nfile++;
+                file_list->files = g_list_append(file_list->files, value);
+            }
+            else {
+                digest_cpy = g_strdup(digest_txt);
+                file_list = g_malloc(sizeof(file_list_t));
+                file_list->nfile = 1;
+                file_list->files = g_list_append(NULL, value);
+                g_hash_table_insert(fdata->hash, digest_cpy, file_list);
+            }
+        }
+        else
+            g_warning("digest calculation failed on file '%s'", file);
+        g_checksum_reset(fdata->digest);
     }
+    else
+	g_warning("unable to open file '%s' for reading - %m", file);
     return FALSE;
 }
 
@@ -615,11 +576,11 @@ static const char help_text[] =
 
 int main(int argc, char **argv)
 {
-    char       *ptr;
-    int	       opt;
-    GTree      *file_tree;
-    GHashTable *digest_hash;
-    int	       status;
+    char           *ptr;
+    int	           opt;
+    GTree          *file_tree;
+    tree_foreach_t foreach_data;
+    int	           status;
 
     static struct option long_options[] =
     {
@@ -723,13 +684,14 @@ int main(int argc, char **argv)
 
     if (options & OPT_VERBOSE)
 	g_log(NULL, G_LOG_LEVEL_INFO, "calculating digests");
-    digest_hash = g_hash_table_new(g_str_hash, g_str_equal);
-    g_tree_foreach(file_tree, file_foreach, digest_hash);
+    foreach_data.hash = g_hash_table_new(g_str_hash, g_str_equal);
+    foreach_data.digest =g_checksum_new(G_CHECKSUM_MD5);
+    g_tree_foreach(file_tree, file_foreach, &foreach_data);
 
     /* Phase three - check for exact match and carry out actions */
 
     if (options & OPT_VERBOSE)
 	g_log(NULL, G_LOG_LEVEL_INFO, "performing required actions");
-    g_hash_table_foreach(digest_hash, digest_foreach, NULL);
+    g_hash_table_foreach(foreach_data.hash, digest_foreach, NULL);
     return status;
 }
