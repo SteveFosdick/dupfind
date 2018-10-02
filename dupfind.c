@@ -23,19 +23,19 @@
  * The first phase builds the list of files to be searched for duplicates
  * by taking file names from the command line and/or reading stdin, and
  * recursing into sub-directories if told to.  This list of filenames is
- * stored in a hash table for which the key is the filename and the
- * associated data is various information about the file, most from the
- * stat(2) system call.	 A hash table is used rather than a simple list
- * to make sure the same filename is not entered more than once.
+ * stored in a binary tree for which the key is the filename and the
+ * associated data is various information about the file, mostly from the
+ * stat(2) system call.	 A tree is used rather than a simple list to make
+ * sure the same filename is not entered more than once.
  *
- * The second phase steps though the list of files in the hash table built
- * by phase one, calculates a message digest for each file (MD5) and
- * builds another hash table, this time with the message digest as the key,
- * and a linked list of files having that digest as the value.
+ * The second phase steps though the list of files in the tree built by
+ * phase one, calculates a message digest for each file (MD5) and* builds
+ * a hash table with the message digest as the key and a linked list of
+ * files having that digest as the value.
  *
- * The third phase steps through the second hash table looking for groups
- * of more than one file sharing the same digest.  An exact match between
- * files in the group is checked with byte-by-byte comparison and the action
+ * The third phase steps through the hash table looking for groups of more
+ * than one file sharing the same digest.  An exact match between files in
+ * the group is checked with byte-by-byte comparison and the action
  * specified on the command line (list, link or delete) is applied.
  */
 
@@ -138,7 +138,7 @@ static int (*stat_func)(const char *name, struct stat *buf) = lstat;
  * worked on - it works out whether it is a file/directory etc. and
  * either adds it to the list or recusrses into it. */
 
-static int do_fsobj(GHashTable *file_hash, const char *name)
+static int do_fsobj(GTree *file_tree, const char *name)
 {
     int		  status;
     struct stat	  stbuf;
@@ -155,7 +155,7 @@ static int do_fsobj(GHashTable *file_hash, const char *name)
 	{
 	    if (stbuf.st_size > 0 || !(options & OPT_NOEMPTY))
 	    {
-		if (g_hash_table_lookup(file_hash, name))
+		if (g_tree_lookup(file_tree, name))
 		{
 		    if (!(options & OPT_QUIET))
 			g_warning("filename '%s' alreday seen", name);
@@ -169,7 +169,7 @@ static int do_fsobj(GHashTable *file_hash, const char *name)
 		    fp->st_mode = stbuf.st_mode;
 		    fp->st_dev = stbuf.st_dev;
 		    fp->st_ino = stbuf.st_ino;
-		    g_hash_table_insert(file_hash, fp->name, fp);
+		    g_tree_insert(file_tree, fp->name, fp);
 		}
 	    }
 	}
@@ -186,7 +186,7 @@ static int do_fsobj(GHashTable *file_hash, const char *name)
 			    (dname[1] != '.' && dname[1] != '\0'))
 			{
 			    path = g_strconcat(name, "/", dent->d_name, NULL);
-			    status += do_fsobj(file_hash, path);
+			    status += do_fsobj(file_tree, path);
 			    g_free(path);
 			}
 		    }
@@ -213,7 +213,7 @@ static int do_fsobj(GHashTable *file_hash, const char *name)
 /* Function called during phase one to read filenames from stdin
  * and add them to the list. */
 
-static int do_stdin(GHashTable *file_hash)
+static int do_stdin(GTree *file_tree)
 {
     int	 status = 0;
     char name[1024];
@@ -223,7 +223,7 @@ static int do_stdin(GHashTable *file_hash)
     {
 	if ((ptr = strchr(name, '\n')))
 	    *ptr = '\0';
-	status += do_fsobj(file_hash, name);
+	status += do_fsobj(file_tree, name);
     }
     return status;
 }
@@ -288,7 +288,7 @@ static char *digest_file(const char *file)
 /* Function called during phase two by g_hash_table_foreach for each
  * file in the first hashtable, keyed by filename */
 
-static void file_foreach(gpointer key, gpointer value, gpointer udata)
+static gboolean file_foreach(gpointer key, gpointer value, gpointer udata)
 {
     char	*file = key;
     char	*digest_txt;
@@ -312,6 +312,7 @@ static void file_foreach(gpointer key, gpointer value, gpointer udata)
 	    g_hash_table_insert(digest_hash, digest_txt, file_list);
 	}
     }
+    return FALSE;
 }
 
 /* Comparison function used during phase three, called by g_list_sort
@@ -616,7 +617,7 @@ int main(int argc, char **argv)
 {
     char       *ptr;
     int	       opt;
-    GHashTable *file_hash;
+    GTree      *file_tree;
     GHashTable *digest_hash;
     int	       status;
 
@@ -712,18 +713,18 @@ int main(int argc, char **argv)
 
     if (options & OPT_VERBOSE)
 	g_log(NULL, G_LOG_LEVEL_INFO, "building file list");
-    file_hash = g_hash_table_new(g_str_hash, g_str_equal);
+    file_tree = g_tree_new((GCompareFunc)strcmp);
     while (optind < argc)
-	status += do_fsobj(file_hash, argv[optind++]);
+	status += do_fsobj(file_tree, argv[optind++]);
     if (options & OPT_STDIN)
-	status += do_stdin(file_hash);
+	status += do_stdin(file_tree);
 
     /* Phase two - group files by message digest */
 
     if (options & OPT_VERBOSE)
 	g_log(NULL, G_LOG_LEVEL_INFO, "calculating digests");
     digest_hash = g_hash_table_new(g_str_hash, g_str_equal);
-    g_hash_table_foreach(file_hash, file_foreach, digest_hash);
+    g_tree_foreach(file_tree, file_foreach, digest_hash);
 
     /* Phase three - check for exact match and carry out actions */
 
